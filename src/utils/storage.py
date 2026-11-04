@@ -186,7 +186,15 @@ class JsonStorage:
     def _backup_existing(self, target: Path) -> None:
         self.backups_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%dT%H%M%S_%f")
-        backup_path = self.backups_dir / f"{target.stem}__{stamp}{target.suffix}"
+        backup_base = f"{target.stem}__{stamp}"
+        backup_path = self.backups_dir / f"{backup_base}{target.suffix}"
+        # Windows 时钟精度可能让连续备份得到同一时间戳；追加序号避免互相覆盖。
+        suffix_index = 1
+        while backup_path.exists():
+            backup_path = self.backups_dir / (
+                f"{backup_base}_{suffix_index}{target.suffix}"
+            )
+            suffix_index += 1
         try:
             shutil.copy2(target, backup_path)
         except OSError as exc:
