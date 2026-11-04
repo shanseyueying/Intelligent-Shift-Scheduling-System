@@ -28,6 +28,43 @@ def test_build_day_maps_rest_to_absent_assignment(
     assert day.note == "早班交接钥匙"
 
 
+def test_build_day_persists_only_explicit_rest_people(
+    base_settings: AppSettings,
+) -> None:
+    day = ScheduleService.build_day(
+        base_settings,
+        date(2026, 11, 10),
+        {"person_a": None, "person_b": None},
+        "",
+        rest_person_ids=["person_a"],
+    )
+
+    assert day.assignments == []
+    assert day.rest_person_ids == ["person_a"]
+
+
+def test_build_day_rejects_unknown_rest_and_assignment_overlap(
+    base_settings: AppSettings,
+) -> None:
+    with pytest.raises(ScheduleServiceError, match="休息人员引用不存在"):
+        ScheduleService.build_day(
+            base_settings,
+            date(2026, 11, 10),
+            {"person_a": None, "person_b": None},
+            "",
+            rest_person_ids=["person_missing"],
+        )
+
+    with pytest.raises(ScheduleServiceError, match="同时排班和休息"):
+        ScheduleService.build_day(
+            base_settings,
+            date(2026, 11, 10),
+            {"person_a": "shift_early", "person_b": None},
+            "",
+            rest_person_ids=["person_a"],
+        )
+
+
 def test_build_day_requires_every_person(base_settings: AppSettings) -> None:
     with pytest.raises(ScheduleServiceError, match="缺少人员"):
         ScheduleService.build_day(
@@ -88,6 +125,28 @@ def test_upsert_empty_day_removes_it(base_plan: SchedulePlan) -> None:
 
     assert updated.days == []
     assert len(base_plan.days) == 1
+
+
+def test_upsert_rest_only_day_is_retained(
+    base_settings: AppSettings,
+) -> None:
+    plan = SchedulePlan(
+        id="plan_rest_only",
+        name="休息方案",
+        created_at=TEST_TIME,
+        updated_at=TEST_TIME,
+    )
+    rest_day = ScheduleService.build_day(
+        base_settings,
+        date(2026, 11, 10),
+        {"person_a": None, "person_b": None},
+        "",
+        rest_person_ids=["person_b"],
+    )
+    updated = ScheduleService.upsert_day(plan, rest_day)
+
+    assert len(updated.days) == 1
+    assert updated.days[0].rest_person_ids == ["person_b"]
 
 
 def test_upsert_note_only_day_is_retained(base_settings: AppSettings) -> None:

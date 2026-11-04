@@ -38,6 +38,7 @@ _TEMPLATE_PEOPLE = "template.person_ids"
 _TEMPLATE_CYCLE_DAYS = "template.cycle_days"
 _TEMPLATE_CELLS = "template.cells"
 _TEMPLATE_PREVIEW = "template.preview"
+_TEMPLATE_OVERWRITE = "template.overwrite_existing"
 
 
 def _render_constraint_banner(
@@ -80,20 +81,34 @@ def _render_schedule_detail(
 ) -> None:
     people = {person.id: person for person in settings.people}
     shifts = {shift.id: shift for shift in settings.shifts}
-    rows = [
-        {
-            "日期": day.date.isoformat(),
-            "人员": getattr(
-                people.get(assignment.person_id),
-                "name",
-                assignment.person_id,
-            ),
-            "班次": shift_label(assignment.shift_id, shifts),
-            "交接备注": day.note,
-        }
-        for day in sorted(plan.days, key=lambda item: item.date)
-        for assignment in day.assignments
-    ]
+    rows: list[dict[str, str]] = []
+    for day in sorted(plan.days, key=lambda item: item.date):
+        for assignment in day.assignments:
+            rows.append(
+                {
+                    "日期": day.date.isoformat(),
+                    "人员": getattr(
+                        people.get(assignment.person_id),
+                        "name",
+                        assignment.person_id,
+                    ),
+                    "班次": shift_label(assignment.shift_id, shifts),
+                    "交接备注": day.note,
+                }
+            )
+        for person_id in day.rest_person_ids:
+            rows.append(
+                {
+                    "日期": day.date.isoformat(),
+                    "人员": getattr(
+                        people.get(person_id),
+                        "name",
+                        person_id,
+                    ),
+                    "班次": "休息",
+                    "交接备注": day.note,
+                }
+            )
     if rows:
         st.dataframe(
             pd.DataFrame(rows),
@@ -125,6 +140,16 @@ def _template_cells() -> dict[tuple[int, str], str | None]:
     return dict(stored) if isinstance(stored, dict) else {}
 
 
+def _template_status(
+    shift_id: str | None,
+    is_rest: bool,
+    shifts: dict[str, Shift],
+) -> str:
+    if shift_id is not None:
+        return shift_label(shift_id, shifts)
+    return "休息" if is_rest else "未安排"
+
+
 def _render_template_preview(
     preview: TemplatePreview,
     plan: SchedulePlan,
@@ -135,11 +160,18 @@ def _render_template_preview(
 ) -> None:
     st.divider()
     st.markdown("#### 铺排预览")
-    added_col, leave_col, skipped_col, rest_col = st.columns(4)
-    added_col.metric("将新增", preview.added_count)
-    leave_col.metric("请假跳过", preview.leave_skipped_count)
-    skipped_col.metric("已有安排保留", preview.skipped_existing_count)
-    rest_col.metric("休息格", preview.rest_cell_count)
+    added_col, overwrite_col, rest_col, skipped_col = st.columns(4)
+    added_col.metric("新增排班", preview.added_count)
+    overwrite_col.metric("覆盖调整", preview.overwrite_change_count)
+    rest_col.metric("新增休息", preview.rest_added_count)
+    skipped_col.metric("已有保留", preview.skipped_existing_count)
+    st.caption(
+        f"周期内休息格 {preview.rest_cell_count} · "
+        f"请假跳过 {preview.leave_skipped_count} · "
+        f"替换班次 {preview.replaced_assignment_count} · "
+        f"清空为休息 {preview.cleared_assignment_count} · "
+        f"休息改班次 {preview.replaced_rest_count}"
+    )
 
     if preview.existing_violation_count:
         st.caption(
@@ -148,25 +180,43 @@ def _render_template_preview(
         )
 
     if not preview.has_changes:
-        st.info("所选范围内没有可补充的空白排班格，因此没有可应用的变化。")
+        st.info(
+            "所选范围内没有需要新增或调整的格子。"
+            "若已有班次需要修改，请先打开“覆盖已有排班和休息”再生成预览。"
+        )
         return
 
-    rows = [
-        {
-            "日期": addition.date.isoformat(),
-            "人员": getattr(people.get(addition.person_id), "name", addition.person_id),
-            "班次": shift_label(addition.shift_id, shifts),
-        }
-        for addition in preview.added
-    ]
     max_rows = 200
+    change_rows = [
+        {
+            "日期": change.date.isoformat(),
+            "人员": getattr(
+                people.get(change.person_id),
+                "name",
+                change.person_id,
+            ),
+            "原状态": _template_status(
+                change.before_shift_id,
+                change.before_is_rest,
+                shifts,
+            ),
+            "新状态": _template_status(
+                change.after_shift_id,
+                change.after_is_rest,
+                shifts,
+            ),
+        }
+        for change in preview.changes[:max_rows]
+    ]
     st.dataframe(
-        pd.DataFrame(rows[:max_rows]),
+        pd.DataFrame(change_rows),
         width="stretch",
         hide_index=True,
     )
-    if len(rows) > max_rows:
-        st.caption(f"仅展示前 {max_rows} 条，共 {len(rows)} 条新增安排。")
+    if len(preview.changes) > max_rows:
+        st.caption(
+            f"仅展示前 {max_rows} 条，共 {len(preview.changes)} 条变化。"
+        )
 
     acknowledged = True
     if preview.new_hard_violations:
@@ -181,6 +231,18 @@ def _render_template_preview(
             "我已知悉新增的硬约束冲突，仍要应用该模板",
             key=f"template_ack::{preview.request.signature()}",
         )
+
+    if preview.has_destructive_changes:
+        st.warning(
+            "这次预览会替换或清空已有班次/休息状态。"
+            "请先核对上表的原状态和新状态。"
+        )
+        overwrite_ack = st.checkbox(
+            "我确认覆盖或清空上述已有排班和休息状态",
+            key=f"template_overwrite_ack::{preview.request.signature()}",
+            value=False,
+        )
+        acknowledged = acknowledged and overwrite_ack
 
     apply_clicked = st.button(
         "应用到当前方案",
@@ -205,8 +267,10 @@ def _render_template_preview(
     st.session_state.pop(_TEMPLATE_PREVIEW, None)
     set_flash(
         f"模板已应用：新增 {preview.added_count} 条排班，"
+        f"覆盖 {preview.overwrite_change_count} 个已有状态，"
+        f"新增 {preview.rest_added_count} 个休息标记；"
         f"跳过 {preview.leave_skipped_count} 个请假格，"
-        f"保留 {preview.skipped_existing_count} 条已有安排。",
+        f"保留 {preview.skipped_existing_count} 个已有格。",
         "success",
     )
     st.rerun()
@@ -225,8 +289,9 @@ def _render_template_section(
 
     with st.expander("周期模板铺排", expanded=False):
         st.caption(
-            "定义 1–14 天循环矩阵，按日期区间重复铺排。"
-            "只补充空白格，不覆盖已有排班和交接备注；已停用项不会参与新模板。"
+            "定义 1–14 天循环矩阵，按日期区间重复铺排。默认只补空白："
+            "已有班次和休息会保留，空白格可写入班次或显式休息。"
+            "需要批量修正旧班表时，打开下面的覆盖选项。"
         )
         if not active_people or not active_shifts:
             st.info("请先在基础配置中添加并启用人员和班次。")
@@ -268,6 +333,22 @@ def _render_template_section(
             return
         if end_date < start_date:
             st.error("结束日期不能早于开始日期。")
+
+        overwrite_existing = st.checkbox(
+            "覆盖选中人员在该区间的已有排班和休息",
+            key=_TEMPLATE_OVERWRITE,
+            value=False,
+            help=(
+                "默认关闭，只补充空白格并保留已有状态。"
+                "开启后会用周期矩阵替换选中人员在该区间的班次或休息，"
+                "其他人员和当天备注仍保留；应用前还有一次预览和确认。"
+            ),
+        )
+        if overwrite_existing:
+            st.warning(
+                "覆盖模式会改写已有班次/休息状态，请务必在预览中核对"
+                "“原状态 → 新状态”。"
+            )
 
         selected_people = [people[person_id] for person_id in participants]
         cells = _template_cells()
@@ -329,6 +410,7 @@ def _render_template_section(
             end_date=end_date,
             person_ids=tuple(participants),
             cycle=cycle,
+            overwrite_existing=overwrite_existing,
         )
 
         existing_preview = st.session_state.get(_TEMPLATE_PREVIEW)
@@ -374,7 +456,7 @@ def render(
     )
     render_calendar(settings, plan, storage, is_active=is_active)
 
-    if not any(day.assignments for day in plan.days):
+    if not any(day.assignments or day.rest_person_ids for day in plan.days):
         st.info(
             "当前方案还没有排班。可以点击任意日期手动安排，"
             "或在下方使用周期模板批量铺排。"
@@ -407,7 +489,10 @@ def render(
         )
 
     st.markdown("#### 排班与缺岗明细")
-    with st.expander("缺岗明细", expanded=coverage.has_shortages):
+    with st.expander(
+        "缺岗明细",
+        expanded=coverage.has_shortages and len(coverage.shortages) <= 10,
+    ):
         _render_coverage_detail(coverage)
     with st.expander("排班明细", expanded=False):
         _render_schedule_detail(settings, plan)

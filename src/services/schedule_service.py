@@ -5,7 +5,7 @@ UI 只负责收集表单值；这里负责引用完整性、单人单日唯一�
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 
@@ -37,6 +37,8 @@ class DayEditView:
     on_leave_people: tuple[Person, ...]
     initial_shift_by_person: dict[str, str | None]
     all_person_ids: tuple[str, ...]
+    rest_person_ids: tuple[str, ...] = ()
+    preserved_rest_person_ids: tuple[str, ...] = ()
 
     def merge_selections(
         self,
@@ -73,6 +75,7 @@ class ScheduleService:
         shifts = {shift.id: shift for shift in settings.shifts}
         current_day = plan.day_map.get(on_date)
         assignments = current_day.assignments if current_day else []
+        rest_ids = set(current_day.rest_person_ids) if current_day else set()
 
         for assignment in assignments:
             if assignment.person_id not in people:
@@ -82,6 +85,11 @@ class ScheduleService:
             if assignment.shift_id not in shifts:
                 raise ScheduleServiceError(
                     f"该日存在未知班次引用: {assignment.shift_id}"
+                )
+        for person_id in rest_ids:
+            if person_id not in people:
+                raise ScheduleServiceError(
+                    f"该日存在未知休息人员引用: {person_id}"
                 )
 
         on_leave_ids = LeaveService.people_on_leave(settings, on_date)
@@ -100,6 +108,7 @@ class ScheduleService:
             and person.id not in preserved_people
             and person.id not in on_leave_ids
         )
+        editable_ids = {person.id for person in editable_people}
         current_shift = {
             assignment.person_id: assignment.shift_id for assignment in assignments
         }
@@ -120,6 +129,16 @@ class ScheduleService:
             on_leave_people=on_leave_people,
             initial_shift_by_person=initial,
             all_person_ids=tuple(person.id for person in settings.people),
+            rest_person_ids=tuple(
+                person.id
+                for person in settings.people
+                if person.id in rest_ids and person.id in editable_ids
+            ),
+            preserved_rest_person_ids=tuple(
+                person.id
+                for person in settings.people
+                if person.id in rest_ids and person.id not in editable_ids
+            ),
         )
 
     @staticmethod
@@ -128,11 +147,14 @@ class ScheduleService:
         on_date: date,
         selected_shift_ids: Mapping[str, str | None],
         note: str,
+        *,
+        rest_person_ids: Iterable[str] = (),
     ) -> DaySchedule:
-        """根据“人员 -> 班次/None（休息）”构造经过校验的 DaySchedule。
+        """根据“人员 -> 班次/None”和显式休息人员构造 DaySchedule。
 
         selected_shift_ids 必须覆盖配置中的全部人员。强制全覆盖是为了避免
-        UI 漏行时把某人的已有排班悄悄删掉。
+        UI 漏行时把某人的已有排班悄悄删掉。None 表示该人当天未排班；
+        只有 rest_person_ids 中的人员才会被记为“显式休息”。
         """
         expected_people = {person.id for person in settings.people}
         provided_people = set(selected_shift_ids)
@@ -160,10 +182,27 @@ class ScheduleService:
                 Assignment(person_id=person.id, shift_id=shift_id)
             )
 
+        rest_ids = list(dict.fromkeys(rest_person_ids))
+        unknown_rest = set(rest_ids) - expected_people
+        if unknown_rest:
+            raise ScheduleServiceError(
+                f"休息人员引用不存在: {sorted(unknown_rest)}"
+            )
+        assigned_ids = {assignment.person_id for assignment in assignments}
+        overlap = assigned_ids & set(rest_ids)
+        if overlap:
+            raise ScheduleServiceError(
+                f"同一人不能同时排班和休息: {sorted(overlap)}"
+            )
+        ordered_rest_ids = [
+            person.id for person in settings.people if person.id in set(rest_ids)
+        ]
+
         try:
             return DaySchedule(
                 date=on_date,
                 assignments=assignments,
+                rest_person_ids=ordered_rest_ids,
                 note=note,
             )
         except ValidationError as exc:
@@ -176,9 +215,9 @@ class ScheduleService:
         *,
         now=None,
     ) -> SchedulePlan:
-        """新增或替换某日；无班次且无备注时移除该日，避免空记录堆积。"""
+        """新增或替换某日；无班次、无休息且无备注时移除该日。"""
         retained = [existing for existing in plan.days if existing.date != day.date]
-        if day.assignments or day.note:
+        if day.assignments or day.rest_person_ids or day.note:
             retained.append(day)
         retained.sort(key=lambda item: item.date)
         try:

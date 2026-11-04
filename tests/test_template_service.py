@@ -6,7 +6,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from src.models import AppSettings, SchedulePlan
+from src.models import AppSettings, DaySchedule, SchedulePlan
 from src.services.config_service import ConfigService
 from src.services.constraint_service import ConstraintService
 from src.services.template_service import (
@@ -23,12 +23,14 @@ def _request(
     end: date,
     people: tuple[str, ...],
     cycle: tuple[tuple[str | None, ...], ...],
+    overwrite: bool = False,
 ) -> TemplateRequest:
     return TemplateRequest(
         start_date=start,
         end_date=end,
         person_ids=people,
         cycle=cycle,
+        overwrite_existing=overwrite,
     )
 
 
@@ -55,6 +57,7 @@ def test_preview_fills_cycle_and_counts_rest_cells(
     )
 
     assert preview.added_count == 9
+    assert preview.rest_added_count == 1
     assert preview.skipped_existing_count == 0
     assert preview.rest_cell_count == 1
     assert preview.new_hard_violations == ()
@@ -69,6 +72,7 @@ def test_preview_fills_cycle_and_counts_rest_cells(
         day for day in preview.candidate_plan.days if day.date == date(2026, 11, 12)
     )
     assert [assignment.person_id for assignment in day_12.assignments] == ["person_b"]
+    assert day_12.rest_person_ids == ["person_a"]
 
 
 def test_preview_only_fills_empty_slots_and_preserves_notes(
@@ -212,6 +216,185 @@ def test_reapplying_same_template_adds_nothing(
     assert second.added_count == 0
     assert second.skipped_existing_count == 6
     assert second.new_hard_violations == ()
+
+
+def test_rest_cells_persist_and_are_not_refilled_on_reapply(
+    base_settings: AppSettings,
+) -> None:
+    request = _request(
+        start=date(2026, 11, 10),
+        end=date(2026, 11, 13),
+        people=("person_a",),
+        cycle=((None,), ("shift_early",)),
+    )
+    empty_plan = SchedulePlan(
+        id="plan_template_rest_lock",
+        name="休息锁定",
+        created_at=TEST_TIME,
+        updated_at=TEST_TIME,
+    )
+
+    first = TemplateService.build_preview(base_settings, empty_plan, request)
+    second = TemplateService.build_preview(
+        base_settings,
+        first.candidate_plan,
+        request,
+    )
+
+    assert first.added_count == 2
+    assert first.rest_added_count == 2
+    assert first.changes
+    rest_dates = {
+        day.date
+        for day in first.candidate_plan.days
+        if day.rest_person_ids == ["person_a"]
+    }
+    assert rest_dates == {date(2026, 11, 10), date(2026, 11, 12)}
+    assert second.added_count == 0
+    assert second.rest_added_count == 0
+    assert second.has_changes is False
+    assert second.skipped_existing_count == 2
+
+
+def test_fill_only_does_not_replace_existing_rest_or_assignment(
+    base_settings: AppSettings,
+) -> None:
+    plan = SchedulePlan(
+        id="plan_template_rest_protected",
+        name="保护休息",
+        created_at=TEST_TIME,
+        updated_at=TEST_TIME,
+        days=[
+            DaySchedule(
+                date=date(2026, 11, 10),
+                rest_person_ids=["person_a"],
+            )
+        ],
+    )
+    request = _request(
+        start=date(2026, 11, 10),
+        end=date(2026, 11, 10),
+        people=("person_a",),
+        cycle=(("shift_early",),),
+    )
+
+    preview = TemplateService.build_preview(base_settings, plan, request)
+
+    assert preview.added_count == 0
+    assert preview.skipped_existing_count == 1
+    assert preview.has_changes is False
+    assert preview.candidate_plan.days[0].rest_person_ids == ["person_a"]
+
+
+def test_overwrite_mode_replaces_existing_assignments(
+    base_settings: AppSettings,
+    base_plan: SchedulePlan,
+) -> None:
+    request = _request(
+        start=date(2026, 11, 2),
+        end=date(2026, 11, 2),
+        people=("person_a", "person_b"),
+        cycle=(("shift_night", "shift_early"),),
+        overwrite=True,
+    )
+
+    preview = TemplateService.build_preview(base_settings, base_plan, request)
+
+    assert preview.added_count == 0
+    assert preview.replaced_assignment_count == 2
+    assert preview.cleared_assignment_count == 0
+    assert preview.has_destructive_changes is True
+    assert preview.has_changes is True
+    day = preview.candidate_plan.days[0]
+    assert {
+        (assignment.person_id, assignment.shift_id)
+        for assignment in day.assignments
+    } == {
+        ("person_a", "shift_night"),
+        ("person_b", "shift_early"),
+    }
+
+
+def test_overwrite_mode_clears_assignment_to_explicit_rest(
+    base_settings: AppSettings,
+    base_plan: SchedulePlan,
+) -> None:
+    request = _request(
+        start=date(2026, 11, 2),
+        end=date(2026, 11, 2),
+        people=("person_a", "person_b"),
+        cycle=((None, "shift_night"),),
+        overwrite=True,
+    )
+
+    preview = TemplateService.build_preview(base_settings, base_plan, request)
+
+    assert preview.cleared_assignment_count == 1
+    assert preview.rest_added_count == 0
+    day = next(
+        day
+        for day in preview.candidate_plan.days
+        if day.date == date(2026, 11, 2)
+    )
+    assert day.rest_person_ids == ["person_a"]
+    assert [(a.person_id, a.shift_id) for a in day.assignments] == [
+        ("person_b", "shift_night")
+    ]
+
+
+def test_overwrite_mode_replaces_rest_with_assignment(
+    base_settings: AppSettings,
+) -> None:
+    plan = SchedulePlan(
+        id="plan_template_rest_replace",
+        name="休息改班",
+        created_at=TEST_TIME,
+        updated_at=TEST_TIME,
+        days=[
+            DaySchedule(
+                date=date(2026, 11, 10),
+                rest_person_ids=["person_a"],
+            )
+        ],
+    )
+    request = _request(
+        start=date(2026, 11, 10),
+        end=date(2026, 11, 10),
+        people=("person_a",),
+        cycle=(("shift_early",),),
+        overwrite=True,
+    )
+
+    preview = TemplateService.build_preview(base_settings, plan, request)
+
+    assert preview.replaced_rest_count == 1
+    assert preview.added_count == 0
+    assert preview.changes[0].before_is_rest is True
+    day = preview.candidate_plan.days[0]
+    assert day.rest_person_ids == []
+    assert [(a.person_id, a.shift_id) for a in day.assignments] == [
+        ("person_a", "shift_early")
+    ]
+
+
+def test_overwrite_flag_changes_request_signature(
+    base_settings: AppSettings,
+) -> None:
+    base = _request(
+        start=date(2026, 11, 10),
+        end=date(2026, 11, 10),
+        people=("person_a",),
+        cycle=(("shift_early",),),
+    )
+    overwrite = _request(
+        start=date(2026, 11, 10),
+        end=date(2026, 11, 10),
+        people=("person_a",),
+        cycle=(("shift_early",),),
+        overwrite=True,
+    )
+
+    assert base.signature() != overwrite.signature()
 
 
 @pytest.mark.parametrize(

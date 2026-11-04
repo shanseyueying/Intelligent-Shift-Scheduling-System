@@ -676,14 +676,20 @@ def _preview_frame(
             assignment.person_id: assignment.shift_id
             for assignment in day.assignments
         }
+        rest_ids = set(day.rest_person_ids)
         row: dict[str, str] = {"日期": day.date.isoformat()}
         for person in people:
             shift_id = by_person.get(person.id)
-            row[person.name] = (
-                shifts_by_id[shift_id].name
-                if shift_id in shifts_by_id
-                else ("" if shift_id is None else f"未知班次({shift_id})")
-            )
+            if shift_id is not None:
+                row[person.name] = (
+                    shifts_by_id[shift_id].name
+                    if shift_id in shifts_by_id
+                    else f"未知班次({shift_id})"
+                )
+            elif person.id in rest_ids:
+                row[person.name] = "休息"
+            else:
+                row[person.name] = ""
         row["交接备注"] = day.note
         rows.append(row)
     return pd.DataFrame(rows)
@@ -714,7 +720,7 @@ def _render_csv_export(settings: AppSettings, plan: SchedulePlan) -> None:
     st.markdown("#### 导出当前方案")
     st.caption(
         "宽表格式：第一列为日期，中间每列一名人员，最后一列为交接备注；"
-        "空白表示休息。导出文件带 UTF-8 BOM，可直接用 Excel 打开。"
+        "空白表示未安排，“休息”表示显式休息。导出文件带 UTF-8 BOM，可直接用 Excel 打开。"
     )
     try:
         data, filename = CsvService.export(settings, plan)
@@ -736,7 +742,7 @@ def _render_csv_import(settings: AppSettings, storage: JsonStorage) -> None:
     st.markdown("#### 导入为新方案")
     st.caption(
         "上传后会先做结构与引用校验，通过后才允许导入。导入只会创建新方案，"
-        "不会覆盖当前方案；空白或“休息”表示休息。"
+        "不会覆盖当前方案；空白表示未安排，填“休息”表示显式休息。"
     )
     with st.expander("CSV 格式说明", expanded=False):
         st.markdown(
@@ -744,7 +750,7 @@ def _render_csv_import(settings: AppSettings, storage: JsonStorage) -> None:
             "- 人员列可写成 `人员:张三`（推荐，与导出格式一致），"
             "也可直接写已在基础配置中的姓名。\n"
             "- 可选列：`交接备注`，最多 1000 字。\n"
-            "- 单元格填写班次名称；留空或填“休息”表示休息。\n"
+            "- 单元格填写班次名称；留空表示未安排，填“休息”表示显式休息。\n"
             "- 支持 UTF-8（推荐）及 GB18030；文件不超过 2 MB、数据不超过 5000 行。\n"
             "- 已停用人员/班次允许导入但会警告；硬约束违规也会作为警告展示，不阻止建方案。"
         )
@@ -823,7 +829,8 @@ def _render_csv_import(settings: AppSettings, storage: JsonStorage) -> None:
 
     st.success(
         f"校验通过：{preview.day_count} 天、"
-        f"{preview.assignment_count} 条排班。"
+        f"{preview.assignment_count} 条排班、"
+        f"{preview.rest_count} 个休息标记。"
     )
     for warning in preview.warnings:
         st.warning(warning)
@@ -855,7 +862,7 @@ def _render_csv_import(settings: AppSettings, storage: JsonStorage) -> None:
             f"仅显示前 {_CSV_PREVIEW_DAYS} 天，"
             f"导入后会包含全部 {preview.day_count} 天。"
         )
-    st.caption("空白单元格表示休息；已停用人员列以原姓名展示。")
+    st.caption("空白单元格表示未安排；已停用人员列以原姓名展示。")
 
     plans = storage.list_plans().plans
     if _CSV_NAME not in st.session_state:

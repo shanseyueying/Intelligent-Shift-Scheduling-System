@@ -3,7 +3,8 @@
 对比方向固定为“当前方案相对参考方案”：
 - added：当前方案有、参考方案无；
 - removed：参考方案有、当前方案无；
-- changed：两边同一天同一人但班次不同。
+- changed：两边同一天同一人但班次/休息状态不同。
+显式休息作为内部状态参与比较，避免“休息 vs 未安排”被漏掉。
 只返回变化项，未变化数量单独统计。
 """
 
@@ -76,6 +77,7 @@ class ComparisonService:
     ADDED = "added"
     REMOVED = "removed"
     CHANGED = "changed"
+    REST = "__REST__"
 
     @classmethod
     def compare(
@@ -83,8 +85,8 @@ class ComparisonService:
         current: SchedulePlan,
         reference: SchedulePlan,
     ) -> PlanComparison:
-        current_assignments = cls._assignment_map(current)
-        reference_assignments = cls._assignment_map(reference)
+        current_assignments = cls._status_map(current)
+        reference_assignments = cls._status_map(reference)
 
         diffs: list[AssignmentDiff] = []
         unchanged = 0
@@ -136,10 +138,12 @@ class ComparisonService:
             unchanged_assignment_count=unchanged,
         )
 
-    @staticmethod
-    def _assignment_map(plan: SchedulePlan) -> dict[tuple[date, str], str]:
+    @classmethod
+    def _status_map(cls, plan: SchedulePlan) -> dict[tuple[date, str], str]:
         result: dict[tuple[date, str], str] = {}
         for day in plan.days:
             for assignment in day.assignments:
                 result[(day.date, assignment.person_id)] = assignment.shift_id
+            for person_id in day.rest_person_ids:
+                result[(day.date, person_id)] = cls.REST
         return result

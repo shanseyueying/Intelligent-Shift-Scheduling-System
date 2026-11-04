@@ -102,6 +102,49 @@ def test_compare_reports_direction_and_note_changes() -> None:
     assert comparison.has_changes is True
 
 
+def test_compare_tracks_explicit_rest_status() -> None:
+    reference = _plan(
+        "plan_rest_reference",
+        "参考",
+        [
+            DaySchedule(
+                date=date(2026, 11, 1),
+                assignments=[
+                    Assignment(person_id="person_a", shift_id="shift_early")
+                ],
+            ),
+            DaySchedule(date=date(2026, 11, 2)),
+        ],
+    )
+    current = _plan(
+        "plan_rest_current",
+        "当前",
+        [
+            DaySchedule(
+                date=date(2026, 11, 1),
+                rest_person_ids=["person_a"],
+            ),
+            DaySchedule(
+                date=date(2026, 11, 2),
+                rest_person_ids=["person_b"],
+            ),
+        ],
+    )
+
+    comparison = ComparisonService.compare(current, reference)
+
+    by_date = {item.date: item for item in comparison.assignment_diffs}
+    changed = by_date[date(2026, 11, 1)]
+    assert changed.change_type == ComparisonService.CHANGED
+    assert changed.reference_shift_id == "shift_early"
+    assert changed.current_shift_id == ComparisonService.REST
+    added = by_date[date(2026, 11, 2)]
+    assert added.change_type == ComparisonService.ADDED
+    assert added.reference_shift_id is None
+    assert added.current_shift_id == ComparisonService.REST
+    assert comparison.unchanged_assignment_count == 0
+
+
 def test_identical_plans_have_no_changes(base_plan: SchedulePlan) -> None:
     comparison = ComparisonService.compare(base_plan, base_plan)
 

@@ -23,6 +23,7 @@ from src.utils.dates import local_date_from_iso
 from src.utils.storage import JsonStorage, StorageError
 
 REST_OPTION = "__REST__"
+UNSCHEDULED_OPTION = "__UNSCHEDULED__"
 _CALENDAR_VERSION = "calendar.version"
 _CALENDAR_INITIAL_DATE = "calendar.initial_date"
 _SELECTED_DATE = "calendar.selected_date"
@@ -42,6 +43,8 @@ def shift_label(shift_id: str, shifts: dict[str, Shift]) -> str:
 
 
 def format_shift_option(value: str, shifts: dict[str, Shift]) -> str:
+    if value == UNSCHEDULED_OPTION:
+        return "未安排"
     if value == REST_OPTION:
         return "休息"
     shift = shifts.get(value)
@@ -96,8 +99,8 @@ def _day_editor_dialog(
         f"#### {on_date.isoformat()} · {_WEEKDAYS[on_date.weekday()]}"
     )
     st.caption(
-        "每位人员最多一个班次；选择“休息”会清除该人当天安排。"
-        "请假、已停用人员/班次的历史安排会自动保留。"
+        "每位人员最多一个班次；“未安排”可被模板补充，“休息”会锁定该人当天，"
+        "后续模板不会自动填充。请假、已停用人员/班次的历史安排会自动保留。"
     )
 
     people = {person.id: person for person in settings.people}
@@ -142,9 +145,18 @@ def _day_editor_dialog(
 
     active_shifts = {shift.id: shift for shift in edit_view.active_shifts}
     editable_people = edit_view.editable_people
+    rest_people = set(edit_view.rest_person_ids)
     version = int(st.session_state.get(_CALENDAR_VERSION, 0))
     editor_key = f"day_editor::{plan.id}::{on_date.isoformat()}::{version}"
     edited = None
+
+    def initial_value(person_id: str) -> str:
+        shift_id = edit_view.initial_shift_by_person.get(person_id)
+        if shift_id:
+            return shift_id
+        if person_id in rest_people:
+            return REST_OPTION
+        return UNSCHEDULED_OPTION
 
     with st.form(f"day_form::{editor_key}", border=False):
         if editable_people:
@@ -152,10 +164,7 @@ def _day_editor_dialog(
                 {
                     "人员": [person.name for person in editable_people],
                     "班次": [
-                        edit_view.initial_shift_by_person.get(
-                            person.id, REST_OPTION
-                        )
-                        or REST_OPTION
+                        initial_value(person.id)
                         for person in editable_people
                     ],
                 },
@@ -172,7 +181,11 @@ def _day_editor_dialog(
                     "班次": st.column_config.SelectboxColumn(
                         "班次",
                         required=True,
-                        options=[REST_OPTION, *active_shifts.keys()],
+                        options=[
+                            UNSCHEDULED_OPTION,
+                            REST_OPTION,
+                            *active_shifts.keys(),
+                        ],
                         format_func=lambda value: format_shift_option(
                             value, active_shifts
                         ),
@@ -204,6 +217,7 @@ def _day_editor_dialog(
         return
 
     selected: dict[str, str | None] = {}
+    rest_ids = set(edit_view.preserved_rest_person_ids)
     if editable_people:
         if edited is None or set(edited.index) != {
             person.id for person in editable_people
@@ -212,8 +226,10 @@ def _day_editor_dialog(
             return
         for person_id in edited.index:
             value = edited.at[person_id, "班次"]
-            if value == REST_OPTION:
+            if value in {REST_OPTION, UNSCHEDULED_OPTION}:
                 selected[str(person_id)] = None
+                if value == REST_OPTION:
+                    rest_ids.add(str(person_id))
             elif value in active_shifts:
                 selected[str(person_id)] = str(value)
             else:
@@ -222,7 +238,13 @@ def _day_editor_dialog(
 
     try:
         merged = edit_view.merge_selections(selected)
-        day = ScheduleService.build_day(settings, on_date, merged, note)
+        day = ScheduleService.build_day(
+            settings,
+            on_date,
+            merged,
+            note,
+            rest_person_ids=rest_ids,
+        )
         updated = ScheduleService.upsert_day(plan, day)
         if updated.days == plan.days:
             set_flash("没有检测到排班变化。", "info")
@@ -275,6 +297,19 @@ def _build_events(
                     "backgroundColor": color,
                     "borderColor": color,
                     "textColor": _text_color(color),
+                }
+            )
+        for person_id in day.rest_person_ids:
+            person_name = getattr(people.get(person_id), "name", person_id)
+            events.append(
+                {
+                    "id": f"{day.date.isoformat()}::{person_id}::rest",
+                    "title": f"{person_name} · 休息",
+                    "start": day.date.isoformat(),
+                    "allDay": True,
+                    "backgroundColor": "#E2E8F0",
+                    "borderColor": "#CBD5E1",
+                    "textColor": "#475569",
                 }
             )
     return events

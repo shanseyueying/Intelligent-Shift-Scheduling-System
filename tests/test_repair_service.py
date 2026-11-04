@@ -130,6 +130,29 @@ def test_substitute_is_used_when_no_swap_exists(
     )
 
 
+def test_substitute_does_not_assign_a_person_who_is_explicitly_resting(
+    base_settings: AppSettings,
+) -> None:
+    plan = _plan(
+        [
+            _day(1, [("person_a", "shift_night")]),
+            DaySchedule(
+                date=date(2026, 11, 2),
+                assignments=[
+                    Assignment(person_id="person_a", shift_id="shift_early"),
+                ],
+                rest_person_ids=["person_b"],
+            ),
+        ]
+    )
+    violation = _selected_violation(base_settings, plan)
+
+    result = RepairService.propose(base_settings, plan, violation)
+
+    assert result.recommendation is None
+    assert "没有找到" in result.reason
+
+
 def test_repair_rejects_candidate_that_introduces_new_hard_constraint(
     base_settings: AppSettings,
 ) -> None:

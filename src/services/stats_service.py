@@ -29,6 +29,7 @@ class PersonStats:
     preference_total: int
     preference_satisfied: int
     leave_days: int
+    rest_days: int
     shift_loads: tuple[ShiftLoad, ...]
 
     @property
@@ -65,12 +66,17 @@ class StatsService:
             shift.id: index for index, shift in enumerate(settings.shifts)
         }
         assignments_by_person: dict[str, list[str]] = {}
+        rest_days_by_person: dict[str, int] = {}
 
         for day in plan.days:
             for assignment in day.assignments:
                 assignments_by_person.setdefault(
                     assignment.person_id, []
                 ).append(assignment.shift_id)
+            for person_id in day.rest_person_ids:
+                rest_days_by_person[person_id] = (
+                    rest_days_by_person.get(person_id, 0) + 1
+                )
 
         plan_start, plan_end = cls._plan_span(plan)
         person_rows: list[PersonStats] = []
@@ -128,6 +134,7 @@ class StatsService:
                         plan_start,
                         plan_end,
                     ),
+                    rest_days=rest_days_by_person.get(person.id, 0),
                     shift_loads=shift_loads,
                 )
             )

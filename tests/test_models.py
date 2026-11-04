@@ -95,6 +95,23 @@ def test_day_schedule_rejects_duplicate_person() -> None:
         )
 
 
+def test_day_schedule_deduplicates_rest_and_rejects_shift_overlap() -> None:
+    day = DaySchedule(
+        date=date(2026, 11, 2),
+        rest_person_ids=["person_a", "person_a", "person_b"],
+    )
+    assert day.rest_person_ids == ["person_a", "person_b"]
+
+    with pytest.raises(ValidationError, match="同时排班和休息"):
+        DaySchedule(
+            date=date(2026, 11, 2),
+            assignments=[
+                Assignment(person_id="person_a", shift_id="shift_early"),
+            ],
+            rest_person_ids=["person_a"],
+        )
+
+
 def test_plan_rejects_duplicate_dates() -> None:
     first = DaySchedule(date=date(2026, 11, 2))
     second = DaySchedule(date=date(2026, 11, 2))

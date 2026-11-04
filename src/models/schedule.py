@@ -18,14 +18,22 @@ class Assignment(StrictModel):
 
 
 class DaySchedule(StrictModel):
-    """一天内的所有安排和一条交接备注。
+    """一天内的安排、显式休息人员和一条交接备注。
 
     “单人单日一个班次”在模型层直接成立：assignments 中不允许重复 person_id。
+    rest_person_ids 表示明确安排休息的人员；它与空白“未安排”不同，模板不会
+    自动填充显式休息格。休息与班次不能同时出现在同一人身上。
     """
 
     date: date
     assignments: list[Assignment] = Field(default_factory=list)
+    rest_person_ids: list[str] = Field(default_factory=list)
     note: str = Field(default="", max_length=1000)
+
+    @field_validator("rest_person_ids")
+    @classmethod
+    def _deduplicate_rest_people(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(value))
 
     @model_validator(mode="after")
     def _validate_one_shift_per_person(self) -> "DaySchedule":
@@ -38,6 +46,11 @@ class DaySchedule(StrictModel):
         if duplicates:
             raise ValueError(
                 f"{self.date.isoformat()} 同一天存在重复排班人员: {sorted(duplicates)}"
+            )
+        overlap = set(person_ids) & set(self.rest_person_ids)
+        if overlap:
+            raise ValueError(
+                f"{self.date.isoformat()} 同一人不能同时排班和休息: {sorted(overlap)}"
             )
         return self
 

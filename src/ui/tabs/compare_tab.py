@@ -729,7 +729,7 @@ def _render_comparison(
     note_col.metric("备注变化", comparison.note_change_count)
 
     if not comparison.has_changes:
-        st.success("两个方案的排班和交接备注完全一致。")
+        st.success("两个方案的排班、休息和交接备注完全一致。")
         return
 
     people = {person.id: person.name for person in settings.people}
@@ -742,7 +742,9 @@ def _render_comparison(
 
     def shift_name(shift_id: str | None) -> str:
         if shift_id is None:
-            return "—"
+            return "未安排"
+        if shift_id == ComparisonService.REST:
+            return "休息"
         return shifts.get(shift_id, f"未知班次({shift_id})")
 
     if comparison.assignment_diffs:

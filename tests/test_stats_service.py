@@ -15,6 +15,35 @@ from src.services.stats_service import StatsService
 from tests.helpers import TEST_TIME
 
 
+def test_stats_report_explicit_rest_days_without_load(
+    base_settings: AppSettings,
+) -> None:
+    plan = SchedulePlan(
+        id="plan_stats_rest",
+        name="休息统计",
+        created_at=TEST_TIME,
+        updated_at=TEST_TIME,
+        days=[
+            DaySchedule(
+                date=date(2026, 11, 1),
+                rest_person_ids=["person_a"],
+            ),
+            DaySchedule(
+                date=date(2026, 11, 2),
+                rest_person_ids=["person_a", "person_b"],
+            ),
+        ],
+    )
+
+    stats = StatsService.build(base_settings, plan)
+
+    by_name = {row.name: row for row in stats.people}
+    assert by_name["张三"].rest_days == 2
+    assert by_name["李四"].rest_days == 1
+    assert by_name["张三"].assignment_count == 0
+    assert stats.total_weighted_load == 0.0
+
+
 def test_team_stats_include_zero_load_people_and_exclude_archived(
     base_settings: AppSettings,
 ) -> None:

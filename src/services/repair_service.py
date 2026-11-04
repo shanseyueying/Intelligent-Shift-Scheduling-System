@@ -337,6 +337,12 @@ class RepairService:
             if day.date == early_slot.date
             for assignment in day.assignments
         }
+        resting_on_date = {
+            person_id
+            for day in plan.days
+            if day.date == early_slot.date
+            for person_id in day.rest_person_ids
+        }
         on_leave = LeaveService.people_on_leave(settings, early_slot.date)
         candidates: list[_Candidate] = []
         seen: set[tuple] = set()
@@ -345,7 +351,11 @@ class RepairService:
                 continue
             if person.id == target_person_id:
                 continue
-            if person.id in assigned_on_date or person.id in on_leave:
+            if (
+                person.id in assigned_on_date
+                or person.id in resting_on_date
+                or person.id in on_leave
+            ):
                 continue
             removals = {(early_slot.date, target_person_id)}
             additions = [(early_slot.date, person.id, early_slot.shift_id)]

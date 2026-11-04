@@ -334,6 +334,7 @@ def render(settings: AppSettings, plan: SchedulePlan) -> None:
             "加权负荷": person.weighted_load,
             "偏好满足": _preference_text(person),
             "请假天数": person.leave_days,
+            "休息天数": person.rest_days,
             "班次构成": _composition_text(person),
         }
         for person in stats.people

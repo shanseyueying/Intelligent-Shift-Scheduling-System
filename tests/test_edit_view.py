@@ -75,6 +75,55 @@ def test_archived_person_without_assignment_is_hidden(
     assert merged == {"person_a": "shift_early", "person_b": None}
 
 
+def test_explicit_rest_is_editable_and_archived_rest_is_preserved(
+    base_settings: AppSettings,
+) -> None:
+    plan = SchedulePlan(
+        id="plan_rest_edit",
+        name="休息编辑",
+        created_at=TEST_TIME,
+        updated_at=TEST_TIME,
+        days=[
+            DaySchedule(
+                date=date(2026, 11, 5),
+                rest_person_ids=["person_a", "person_b"],
+            )
+        ],
+    )
+    archived = ConfigService.set_person_active(base_settings, "person_b", False)
+
+    view = ScheduleService.build_edit_view(archived, plan, date(2026, 11, 5))
+
+    assert [person.id for person in view.editable_people] == ["person_a"]
+    assert view.rest_person_ids == ("person_a",)
+    assert view.preserved_rest_person_ids == ("person_b",)
+    assert view.initial_shift_by_person == {"person_a": None}
+
+
+def test_unknown_rest_person_blocks_editing(
+    base_settings: AppSettings,
+) -> None:
+    plan = SchedulePlan(
+        id="plan_unknown_rest",
+        name="脏休息引用",
+        created_at=TEST_TIME,
+        updated_at=TEST_TIME,
+        days=[
+            DaySchedule(
+                date=date(2026, 11, 5),
+                rest_person_ids=["person_missing"],
+            )
+        ],
+    )
+
+    with pytest.raises(ScheduleServiceError, match="未知休息人员"):
+        ScheduleService.build_edit_view(
+            base_settings,
+            plan,
+            date(2026, 11, 5),
+        )
+
+
 def test_unknown_references_block_editing(
     base_settings: AppSettings,
 ) -> None:

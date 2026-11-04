@@ -67,6 +67,37 @@ def test_export_roundtrip_preserves_assignments_and_note(
     assert preview.plan.history_audit[-1].detail["source_name"] == filename
 
 
+def test_export_and_import_preserve_explicit_rest(
+    base_settings: AppSettings,
+) -> None:
+    plan = PlanService.create_plan("休息导出", now=TEST_TIME)
+    day = DaySchedule(
+        date=date(2026, 11, 6),
+        assignments=[
+            Assignment(person_id="person_b", shift_id="shift_night"),
+        ],
+        rest_person_ids=["person_a"],
+        note="白班休息",
+    )
+    plan = PlanService.with_days(plan, [day], now=TEST_TIME)
+
+    data, _ = CsvService.export(base_settings, plan, today=date(2026, 11, 2))
+    text = data.decode("utf-8-sig")
+    assert "休息,夜班,白班休息" in text
+
+    preview = CsvService.parse(
+        base_settings,
+        data,
+        source_name="rest.csv",
+    )
+    restored = preview.plan.days[0]
+    assert restored.rest_person_ids == ["person_a"]
+    assert [(a.person_id, a.shift_id) for a in restored.assignments] == [
+        ("person_b", "shift_night")
+    ]
+    assert preview.rest_count == 1
+
+
 def test_import_accepts_gb18030_and_plain_person_headers(
     base_settings: AppSettings,
 ) -> None:
@@ -89,10 +120,12 @@ def test_import_accepts_gb18030_and_plain_person_headers(
     assert list(first.assignments) == [
         Assignment(person_id="person_b", shift_id="shift_night")
     ]
+    assert first.rest_person_ids == ["person_a"]
     assert first.note == "夜间注意消防通道"
     assert list(second.assignments) == [
         Assignment(person_id="person_b", shift_id="shift_early")
     ]
+    assert second.rest_person_ids == []
 
 
 def test_export_quotes_note_with_comma_and_newline(
@@ -271,9 +304,26 @@ def test_import_rejects_no_usable_rows(base_settings: AppSettings) -> None:
     with pytest.raises(CsvImportError, match="没有可导入"):
         CsvService.parse(
             base_settings,
-            _raw("日期,人员:张三\n2026-11-02,休息\n2026-11-03,\n"),
-            source_name="rest-only.csv",
+            _raw("日期,人员:张三\n2026-11-02,\n2026-11-03,\n"),
+            source_name="blank-only.csv",
         )
+
+
+def test_rest_only_csv_is_imported_as_explicit_rest(
+    base_settings: AppSettings,
+) -> None:
+    preview = CsvService.parse(
+        base_settings,
+        _raw("日期,人员:张三\n2026-11-02,休息\n2026-11-03,\n"),
+        source_name="rest-only.csv",
+    )
+
+    assert preview.day_count == 1
+    assert preview.assignment_count == 0
+    assert preview.rest_count == 1
+    assert preview.plan.days[0].date == date(2026, 11, 2)
+    assert preview.plan.days[0].assignments == []
+    assert preview.plan.days[0].rest_person_ids == ["person_a"]
 
 
 def test_import_rejects_oversized_file(base_settings: AppSettings) -> None:

@@ -2,8 +2,9 @@
 
 格式为宽表：日期 + 人员列 + 交接备注。人员列导出使用“人员:姓名”前缀，
 避免与固定列重名；导入同时接受没有前缀的已知人员姓名。
-空白格表示休息；导入允许已知的停用人员和班次，但会给出警告。
-CSV 校验只负责结构、引用和日期，硬约束违规作为导入预览警告，不阻止创建新方案。
+空白格表示“未安排”，填写“休息”才会写成显式休息；导入允许已知的停用人员
+和班次，但会给出警告。CSV 校验只负责结构、引用和日期，硬约束违规作为导入
+预览警告，不阻止创建新方案。
 """
 
 from __future__ import annotations
@@ -58,6 +59,7 @@ class CsvImportPreview:
     source_name: str
     day_count: int
     assignment_count: int
+    rest_count: int
     inactive_people: tuple[str, ...]
     inactive_shifts: tuple[str, ...]
     hard_violations: tuple[HardConstraintViolation, ...]
@@ -195,6 +197,7 @@ class CsvService:
                 continue
 
             assignments: list[Assignment] = []
+            rest_person_ids: list[str] = []
             row_has_error = False
             for index, person in person_columns.items():
                 cell = row[index].strip()
@@ -203,10 +206,11 @@ class CsvService:
                 shift = shift_by_name.get(cell)
                 if shift is None:
                     if cell in _REST_TOKENS:
+                        rest_person_ids.append(person.id)
                         continue
                     errors.append(
                         f"第 {row_number} 行人员“{person.name}”的班次"
-                        f"“{cell}”不存在；留空表示休息"
+                        f"“{cell}”不存在；留空表示未安排，填“休息”表示休息"
                     )
                     row_has_error = True
                     continue
@@ -221,13 +225,14 @@ class CsvService:
 
             if row_has_error:
                 continue
-            if not assignments and not note:
+            if not assignments and not rest_person_ids and not note:
                 continue
             try:
                 days.append(
                     DaySchedule(
                         date=on_date,
                         assignments=assignments,
+                        rest_person_ids=rest_person_ids,
                         note=note,
                     )
                 )
@@ -246,6 +251,7 @@ class CsvService:
         plan = PlanService.create_plan("CSV 导入预览", now=timestamp)
         plan = PlanService.with_days(plan, days, now=timestamp)
         assignment_count = sum(len(day.assignments) for day in plan.days)
+        rest_count = sum(len(day.rest_person_ids) for day in plan.days)
 
         payload = plan.model_dump()
         audit = [entry.model_dump() for entry in plan.history_audit]
@@ -257,6 +263,7 @@ class CsvService:
                     "source_name": source_name,
                     "day_count": len(plan.days),
                     "assignment_count": assignment_count,
+                    "rest_count": rest_count,
                 },
             ).model_dump()
         )
@@ -280,6 +287,7 @@ class CsvService:
             source_name=source_name,
             day_count=len(plan.days),
             assignment_count=assignment_count,
+            rest_count=rest_count,
             inactive_people=tuple(inactive_people_sorted),
             inactive_shifts=tuple(inactive_shifts_sorted),
             hard_violations=hard_violations,
@@ -299,6 +307,10 @@ class CsvService:
             assignment.person_id
             for day in plan.days
             for assignment in day.assignments
+        } | {
+            person_id
+            for day in plan.days
+            for person_id in day.rest_person_ids
         }
         missing_people = referenced_people - set(person_by_id)
         if missing_people:
@@ -327,13 +339,15 @@ class CsvService:
                     f"{day.date.isoformat()} 引用了不存在的班次："
                     f"{sorted(unknown_shifts)}"
                 )
+            rest_ids = set(day.rest_person_ids)
             row = [day.date.isoformat()]
-            row.extend(
-                shift_by_id[shift_by_person[person.id]].name
-                if person.id in shift_by_person
-                else ""
-                for person in people
-            )
+            for person in people:
+                if person.id in shift_by_person:
+                    row.append(shift_by_id[shift_by_person[person.id]].name)
+                elif person.id in rest_ids:
+                    row.append("休息")
+                else:
+                    row.append("")
             row.append(day.note)
             rows.append(row)
 

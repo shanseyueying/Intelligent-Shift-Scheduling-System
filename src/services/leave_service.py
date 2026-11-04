@@ -109,7 +109,7 @@ class LeaveService:
                 for assignment in day.assignments
                 if (day.date, assignment.person_id) not in conflict_pairs
             ]
-            if not kept and not day.note:
+            if not kept and not day.rest_person_ids and not day.note:
                 continue
             if len(kept) != len(day.assignments):
                 payload = day.model_dump()
