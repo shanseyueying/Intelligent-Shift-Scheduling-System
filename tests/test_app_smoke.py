@@ -364,5 +364,31 @@ def test_csv_import_validation_error_does_not_create_a_plan(
     assert len(list((tmp_path / "plans").glob("*.json"))) == 1
 
 
+def test_manual_date_editor_opens_day_dialog(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SCHEDULE_DATA_DIR", str(tmp_path))
+    app_file = Path(__file__).resolve().parents[1] / "app.py"
+    app = AppTest.from_file(str(app_file), default_timeout=30).run()
+
+    manual_date = next(
+        item for item in app.date_input if item.label == "手动编辑日期"
+    )
+    manual_date.set_value(date(2026, 11, 1)).run()
+    next(
+        button
+        for button in app.button
+        if button.label == "编辑所选日期"
+    ).click().run()
+
+    assert not app.exception
+    assert "保存排班" in [button.label for button in app.button]
+    assert any(
+        "2026-11-01" in str(markdown.value)
+        for markdown in app.markdown
+    )
+
+
 def test_local_date_from_iso_accepts_date_only() -> None:
     assert local_date_from_iso("2026-11-02") == date(2026, 11, 2)

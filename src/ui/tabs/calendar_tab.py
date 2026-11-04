@@ -292,6 +292,8 @@ def _render_template_section(
             "定义 1–14 天循环矩阵，按日期区间重复铺排。默认只补空白："
             "已有班次和休息会保留，空白格可写入班次或显式休息。"
             "需要批量修正旧班表时，打开下面的覆盖选项。"
+            "模板只修改所选范围，开始日期之前的日期不会自动对齐；"
+            "范围外某天需要调整时，请点击日历日期或使用月历下方的手动编辑日期。"
         )
         if not active_people or not active_shifts:
             st.info("请先在基础配置中添加并启用人员和班次。")
@@ -452,7 +454,8 @@ def render(
     is_active: bool = True,
 ) -> None:
     st.caption(
-        "点击任意日期或已有事件，编辑当天全员排班；日历下方查看缺岗、明细和模板铺排。"
+        "点击任意日期或已有事件编辑当天全员排班，也可用月历下方的手动编辑日期；"
+        "再往下查看缺岗、明细和模板铺排。"
     )
     render_calendar(settings, plan, storage, is_active=is_active)
 

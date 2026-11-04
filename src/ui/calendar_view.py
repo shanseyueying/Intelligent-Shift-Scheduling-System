@@ -27,6 +27,7 @@ UNSCHEDULED_OPTION = "__UNSCHEDULED__"
 _CALENDAR_VERSION = "calendar.version"
 _CALENDAR_INITIAL_DATE = "calendar.initial_date"
 _SELECTED_DATE = "calendar.selected_date"
+_MANUAL_DATE = "calendar.manual_date"
 _WEEKDAYS = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
 
 
@@ -349,6 +350,28 @@ def render(
         },
         key=f"schedule_calendar::{plan.id}::{version}",
     )
+
+    manual_col, manual_button_col = st.columns([3, 1])
+    with manual_col:
+        manual_date = st.date_input(
+            "手动编辑日期",
+            key=_MANUAL_DATE,
+            max_value=date(2100, 12, 31),
+            help="如果月历点击没有响应，可在这里选择日期再打开当天排班。",
+        )
+    with manual_button_col:
+        st.write("")
+        if st.button(
+            "编辑所选日期",
+            key="calendar.open_manual_day",
+            width="stretch",
+        ):
+            if manual_date is None:
+                st.warning("请先选择一个日期。")
+            else:
+                st.session_state[_SELECTED_DATE] = manual_date
+                st.session_state[_CALENDAR_INITIAL_DATE] = manual_date
+                st.rerun()
 
     if st.session_state.get(_SELECTED_DATE) is None:
         clicked = _clicked_date(component_value)
