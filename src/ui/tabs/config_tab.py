@@ -162,7 +162,10 @@ def _shift_dialog(
             max_value=99,
             value=int(shift.min_staff) if shift else 1,
             step=1,
-            help="0 表示不检查该班次的覆盖缺口；用于独立缺岗预警，不参与健康分。",
+            help=(
+                "未加入启用中的覆盖组时，按此班次单独检查；加入覆盖组后"
+                "以组最低人数为准。0 表示不检查，不参与健康分。"
+            ),
         )
         is_early = st.checkbox("属于早班", value=shift.is_early if shift else False)
         is_night = st.checkbox("属于夜班", value=shift.is_night if shift else False)
@@ -198,6 +201,95 @@ def _shift_dialog(
                 is_night=is_night,
             )
             success_message = f"已新增班次“{name.strip()}”。"
+        persist_settings(storage, updated)
+    except (ConfigServiceError, StorageError) as exc:
+        st.error(f"保存失败：{exc}")
+        return
+
+    set_flash(success_message, "success")
+    _close_dialog()
+
+
+@st.dialog("缺岗覆盖组", on_dismiss=_dismiss_dialog)
+def _coverage_group_dialog(
+    settings: AppSettings,
+    storage: JsonStorage,
+    group_id: str | None,
+) -> None:
+    group = next(
+        (item for item in settings.coverage_groups if item.id == group_id),
+        None,
+    )
+    if group_id is not None and group is None:
+        st.error("覆盖组不存在，可能已被其他操作修改。")
+        if st.button("关闭", width="stretch"):
+            _close_dialog()
+        return
+    if not settings.shifts:
+        st.info("请先添加班次，再配置覆盖组。")
+        if st.button("关闭", width="stretch"):
+            _close_dialog()
+        return
+
+    st.markdown("#### 编辑覆盖组" if group else "#### 新增覆盖组")
+    labels = _shift_labels(settings)
+    with st.form(f"coverage_group_form::{group_id or 'new'}"):
+        name = st.text_input(
+            "覆盖组名称",
+            value=group.name if group else "",
+            help="例如“日班组”或“夜班组”。同一启用组内不能有重复班次。",
+        )
+        min_staff = st.number_input(
+            "组最低人数",
+            min_value=0,
+            max_value=99,
+            value=int(group.min_staff) if group else 1,
+            step=1,
+            help="组内所有成员的排班人数合并计算；0 表示暂不检查该组。",
+        )
+        shift_ids = st.multiselect(
+            "组内班次",
+            options=[shift.id for shift in settings.shifts],
+            default=group.shift_ids if group else [],
+            format_func=lambda shift_id: labels.get(
+                shift_id, f"未知班次({shift_id})"
+            ),
+            help="例如把白班、早班、中班放进“日班组”，排其中任意班次都计入日班组人数。",
+        )
+        submitted = st.form_submit_button(
+            "保存",
+            type="primary",
+            width="stretch",
+        )
+
+    st.caption(
+        "组内任一班次的人数会合并计算；未加入启用组的班次仍按自己的最低人数检查。"
+        "一个班次只能属于一个启用中的覆盖组。"
+    )
+    if st.button("取消", width="stretch"):
+        _close_dialog()
+
+    if not submitted:
+        return
+
+    try:
+        if group:
+            updated = ConfigService.update_coverage_group(
+                settings,
+                group.id,
+                name=name,
+                min_staff=int(min_staff),
+                shift_ids=shift_ids,
+            )
+            success_message = f"已更新覆盖组“{name.strip()}”。"
+        else:
+            updated = ConfigService.add_coverage_group(
+                settings,
+                name=name,
+                min_staff=int(min_staff),
+                shift_ids=shift_ids,
+            )
+            success_message = f"已新增覆盖组“{name.strip()}”。"
         persist_settings(storage, updated)
     except (ConfigServiceError, StorageError) as exc:
         st.error(f"保存失败：{exc}")
@@ -365,6 +457,12 @@ def _render_shifts(settings: AppSettings, storage: JsonStorage) -> None:
         (True, False): "早班",
         (False, True): "夜班",
     }
+    group_by_shift = {
+        shift_id: group.name
+        for group in settings.coverage_groups
+        if group.is_active
+        for shift_id in group.shift_ids
+    }
     for shift in settings.shifts:
         (
             name_col,
@@ -389,7 +487,10 @@ def _render_shifts(settings: AppSettings, storage: JsonStorage) -> None:
             type_names.get((shift.is_early, shift.is_night), "异常")
         )
         weight_col.caption(f"权重 {shift.load_weight:g}")
-        staffing_col.caption(f"最低 {shift.min_staff} 人")
+        if shift.id in group_by_shift:
+            staffing_col.caption(f"组：{group_by_shift[shift.id]}")
+        else:
+            staffing_col.caption(f"最低 {shift.min_staff} 人")
 
         if edit_col.button("编辑", key=f"edit_shift::{shift.id}", width="stretch"):
             _open_dialog("shift", shift.id)
@@ -412,6 +513,82 @@ def _render_shifts(settings: AppSettings, storage: JsonStorage) -> None:
             else:
                 set_flash(
                     f"已{'停用' if shift.is_active else '恢复'}班次“{shift.name}”。",
+                    "info",
+                )
+                st.rerun()
+
+
+def _render_coverage_groups(
+    settings: AppSettings,
+    storage: JsonStorage,
+) -> None:
+    title_col, add_col = st.columns([4, 1])
+    title_col.markdown("#### 缺岗覆盖组")
+    if add_col.button(
+        "新增覆盖组",
+        width="stretch",
+        disabled=not settings.shifts,
+    ):
+        _open_dialog("coverage_group", None)
+    st.caption(
+        "把可以互相替代的班次放进同一个覆盖组。组内所有成员的排班人数合并计算，"
+        "达到组最低人数即视为该组不缺岗；未入组班次仍按自己的最低人数检查。"
+    )
+
+    if not settings.coverage_groups:
+        st.caption("尚未配置覆盖组，当前按每个班次单独检查缺岗。")
+        return
+
+    shift_labels = _shift_labels(settings)
+    for group in settings.coverage_groups:
+        (
+            name_col,
+            status_col,
+            members_col,
+            minimum_col,
+            edit_col,
+            active_col,
+        ) = st.columns([2.2, 1, 4, 1.1, 1, 1])
+        name_col.markdown(f"**{group.name}**")
+        if group.is_active:
+            status_col.markdown(":green[启用]")
+        else:
+            status_col.markdown(":gray[已停用]")
+        members = "、".join(
+            shift_labels.get(shift_id, f"未知({shift_id})")
+            for shift_id in group.shift_ids
+        )
+        members_col.caption(members or "未配置成员")
+        minimum_col.caption(
+            "不检查" if group.min_staff == 0 else f"最低 {group.min_staff} 人"
+        )
+
+        if edit_col.button(
+            "编辑",
+            key=f"edit_coverage_group::{group.id}",
+            width="stretch",
+        ):
+            _open_dialog("coverage_group", group.id)
+
+        toggle_label = "停用" if group.is_active else "恢复"
+        if active_col.button(
+            toggle_label,
+            key=f"toggle_coverage_group::{group.id}",
+            width="stretch",
+        ):
+            try:
+                updated = ConfigService.set_coverage_group_active(
+                    settings,
+                    group.id,
+                    not group.is_active,
+                )
+                persist_settings(storage, updated)
+            except (ConfigServiceError, StorageError) as exc:
+                st.error(f"操作失败：{exc}")
+            else:
+                set_flash(
+                    f"已{'停用' if group.is_active else '恢复'}覆盖组"
+                    f"“{group.name}”。",
                     "info",
                 )
                 st.rerun()
@@ -767,6 +944,8 @@ def _dispatch_dialog(
         _person_dialog(settings, storage, entity_id)
     elif kind == "shift":
         _shift_dialog(settings, storage, entity_id)
+    elif kind == "coverage_group":
+        _coverage_group_dialog(settings, storage, entity_id)
     elif kind == "leave":
         _leave_dialog(settings, plan, storage)
     elif kind == "delete_leave" and entity_id:
@@ -787,16 +966,22 @@ def render(
     )
     active_people = sum(1 for person in settings.people if person.is_active)
     active_shifts = sum(1 for shift in settings.shifts if shift.is_active)
+    active_groups = sum(
+        1 for group in settings.coverage_groups if group.is_active
+    )
     st.caption(
         f"当前方案“{plan.name}” · "
         f"启用人员 {active_people}/{len(settings.people)} · "
         f"启用班次 {active_shifts}/{len(settings.shifts)} · "
+        f"启用覆盖组 {active_groups}/{len(settings.coverage_groups)} · "
         f"请假记录 {len(settings.leaves)}"
     )
 
     _render_people(settings, storage)
     st.divider()
     _render_shifts(settings, storage)
+    st.divider()
+    _render_coverage_groups(settings, storage)
     st.divider()
     _render_leaves(settings, storage)
     st.divider()

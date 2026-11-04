@@ -10,7 +10,7 @@ from datetime import date
 
 from pydantic import ValidationError
 
-from src.models import AppSettings, LeaveRecord, Person, Shift
+from src.models import AppSettings, CoverageGroup, LeaveRecord, Person, Shift
 
 
 class ConfigServiceError(ValueError):
@@ -142,6 +142,67 @@ class ConfigService:
             raise ConfigServiceError(_format_validation_error(exc)) from exc
         return _replace_shift(settings, updated)
 
+    # ---------- 缺岗覆盖组 ----------
+
+    @staticmethod
+    def add_coverage_group(
+        settings: AppSettings,
+        *,
+        name: str,
+        min_staff: int,
+        shift_ids: list[str],
+    ) -> AppSettings:
+        try:
+            group = CoverageGroup(
+                name=name,
+                min_staff=min_staff,
+                shift_ids=shift_ids,
+            )
+        except ValidationError as exc:
+            raise ConfigServiceError(_format_validation_error(exc)) from exc
+        return _rebuild(
+            settings,
+            coverage_groups=[*settings.coverage_groups, group],
+        )
+
+    @staticmethod
+    def update_coverage_group(
+        settings: AppSettings,
+        group_id: str,
+        *,
+        name: str,
+        min_staff: int,
+        shift_ids: list[str],
+    ) -> AppSettings:
+        group = _find_coverage_group(settings, group_id)
+        try:
+            updated = CoverageGroup.model_validate(
+                {
+                    **group.model_dump(),
+                    "name": name,
+                    "min_staff": min_staff,
+                    "shift_ids": shift_ids,
+                }
+            )
+        except ValidationError as exc:
+            raise ConfigServiceError(_format_validation_error(exc)) from exc
+        return _replace_coverage_group(settings, updated)
+
+    @staticmethod
+    def set_coverage_group_active(
+        settings: AppSettings,
+        group_id: str,
+        is_active: bool,
+    ) -> AppSettings:
+        group = _find_coverage_group(settings, group_id)
+        try:
+            updated = CoverageGroup.model_validate(
+                {**group.model_dump(), "is_active": is_active}
+            )
+        except ValidationError as exc:
+            raise ConfigServiceError(_format_validation_error(exc)) from exc
+        return _replace_coverage_group(settings, updated)
+
     # ---------- 请假 ----------
 
     @staticmethod
@@ -195,6 +256,19 @@ def _find_shift(settings: AppSettings, shift_id: str) -> Shift:
     return shift
 
 
+def _find_coverage_group(
+    settings: AppSettings,
+    group_id: str,
+) -> CoverageGroup:
+    group = next(
+        (item for item in settings.coverage_groups if item.id == group_id),
+        None,
+    )
+    if group is None:
+        raise ConfigServiceError("覆盖组不存在，可能已被其他操作修改")
+    return group
+
+
 def _replace_person(settings: AppSettings, person: Person) -> AppSettings:
     people = [person if item.id == person.id else item for item in settings.people]
     return _rebuild(settings, people=people)
@@ -203,6 +277,17 @@ def _replace_person(settings: AppSettings, person: Person) -> AppSettings:
 def _replace_shift(settings: AppSettings, shift: Shift) -> AppSettings:
     shifts = [shift if item.id == shift.id else item for item in settings.shifts]
     return _rebuild(settings, shifts=shifts)
+
+
+def _replace_coverage_group(
+    settings: AppSettings,
+    group: CoverageGroup,
+) -> AppSettings:
+    groups = [
+        group if item.id == group.id else item
+        for item in settings.coverage_groups
+    ]
+    return _rebuild(settings, coverage_groups=groups)
 
 
 def _format_validation_error(exc: ValidationError) -> str:

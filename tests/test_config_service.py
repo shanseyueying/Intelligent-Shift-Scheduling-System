@@ -105,6 +105,71 @@ def test_shift_cannot_be_both_early_and_night(base_settings: AppSettings) -> Non
         )
 
 
+def test_coverage_group_add_update_and_archive(
+    base_settings: AppSettings,
+) -> None:
+    added = ConfigService.add_coverage_group(
+        base_settings,
+        name="日班组",
+        min_staff=2,
+        shift_ids=["shift_early", "shift_middle"],
+    )
+    group = next(
+        item for item in added.coverage_groups if item.name == "日班组"
+    )
+    assert group.is_active is True
+    assert group.min_staff == 2
+    assert group.shift_ids == ["shift_early", "shift_middle"]
+
+    updated = ConfigService.update_coverage_group(
+        added,
+        group.id,
+        name="白班覆盖组",
+        min_staff=1,
+        shift_ids=["shift_early"],
+    )
+    changed = next(
+        item for item in updated.coverage_groups if item.id == group.id
+    )
+    assert changed.name == "白班覆盖组"
+    assert changed.shift_ids == ["shift_early"]
+    assert next(
+        item for item in added.coverage_groups if item.id == group.id
+    ).name == "日班组"
+
+    archived = ConfigService.set_coverage_group_active(updated, group.id, False)
+    assert next(
+        item for item in archived.coverage_groups if item.id == group.id
+    ).is_active is False
+
+
+def test_coverage_group_rejects_overlap_and_duplicate_name(
+    base_settings: AppSettings,
+) -> None:
+    added = ConfigService.add_coverage_group(
+        base_settings,
+        name="日班组",
+        min_staff=1,
+        shift_ids=["shift_early", "shift_middle"],
+    )
+    with pytest.raises(ConfigServiceError, match="多个启用中的覆盖组"):
+        ConfigService.add_coverage_group(
+            added,
+            name="重叠组",
+            min_staff=1,
+            shift_ids=["shift_middle", "shift_night"],
+        )
+    with pytest.raises(ConfigServiceError, match="覆盖组名称重复"):
+        ConfigService.add_coverage_group(
+            added,
+            name="日班组",
+            min_staff=1,
+            shift_ids=["shift_night"],
+        )
+    with pytest.raises(ConfigServiceError, match="覆盖组不存在"):
+        ConfigService.set_coverage_group_active(added, "coverage_missing", False)
+
+
 def test_leave_add_and_delete(base_settings: AppSettings) -> None:
     added = ConfigService.add_leave(
         base_settings,

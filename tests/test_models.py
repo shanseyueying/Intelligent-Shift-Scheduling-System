@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from src.models import (
     AppSettings,
     Assignment,
+    CoverageGroup,
     DaySchedule,
     LeaveRecord,
     Person,
@@ -108,6 +109,85 @@ def test_plan_rejects_naive_datetime() -> None:
             created_at=datetime(2026, 11, 1, 8, 0),
             updated_at=datetime(2026, 11, 1, 8, 0),
         )
+
+
+def test_coverage_group_deduplicates_shifts_and_validates_name() -> None:
+    group = CoverageGroup(
+        name=" 日班组 ",
+        shift_ids=["shift_early", "shift_middle", "shift_early"],
+    )
+    assert group.name == "日班组"
+    assert group.shift_ids == ["shift_early", "shift_middle"]
+
+    with pytest.raises(ValidationError, match="不能为空"):
+        CoverageGroup(name="  ", shift_ids=["shift_early"])
+    with pytest.raises(ValidationError):
+        CoverageGroup(name="空组", shift_ids=[])
+
+
+def test_settings_rejects_shift_in_two_active_coverage_groups(
+    shifts: list[Shift],
+) -> None:
+    groups = [
+        CoverageGroup(
+            id="coverage_day",
+            name="日班组",
+            shift_ids=["shift_early", "shift_middle"],
+        ),
+        CoverageGroup(
+            id="coverage_mixed",
+            name="混合组",
+            shift_ids=["shift_middle"],
+        ),
+    ]
+    with pytest.raises(ValidationError, match="多个启用中的覆盖组"):
+        AppSettings(shifts=shifts, coverage_groups=groups)
+
+
+def test_settings_allows_shift_overlap_with_an_inactive_group(
+    shifts: list[Shift],
+) -> None:
+    groups = [
+        CoverageGroup(
+            id="coverage_old",
+            name="旧日班组",
+            shift_ids=["shift_early"],
+            is_active=False,
+        ),
+        CoverageGroup(
+            id="coverage_new",
+            name="新日班组",
+            shift_ids=["shift_early"],
+        ),
+    ]
+    settings = AppSettings(shifts=shifts, coverage_groups=groups)
+    assert {group.name for group in settings.coverage_groups} == {
+        "旧日班组",
+        "新日班组",
+    }
+
+
+def test_settings_rejects_coverage_group_with_missing_shift(
+    shifts: list[Shift],
+) -> None:
+    group = CoverageGroup(
+        id="coverage_bad",
+        name="坏组",
+        shift_ids=["shift_missing"],
+    )
+    with pytest.raises(ValidationError, match="不存在的班次"):
+        AppSettings(shifts=shifts, coverage_groups=[group])
+
+
+def test_settings_rejects_duplicate_coverage_group_names(
+    shifts: list[Shift],
+) -> None:
+    groups = [
+        CoverageGroup(name="日班组", shift_ids=["shift_early"]),
+        CoverageGroup(name="日班组", shift_ids=["shift_middle"]),
+    ]
+    with pytest.raises(ValidationError, match="覆盖组名称重复"):
+        AppSettings(shifts=shifts, coverage_groups=groups)
 
 
 def test_settings_rejects_unknown_json_field() -> None:
