@@ -285,6 +285,61 @@ def test_csv_import_creates_and_activates_a_new_plan_through_app(
     assert kept_original.days == original_plan.days
 
 
+def test_coverage_group_dialog_renders_through_app(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SCHEDULE_DATA_DIR", str(tmp_path))
+    app_file = Path(__file__).resolve().parents[1] / "app.py"
+    app = AppTest.from_file(str(app_file), default_timeout=30).run()
+
+    next(
+        button
+        for button in app.button
+        if button.label == "新增覆盖组"
+    ).click().run()
+    assert not app.exception
+    assert "覆盖组名称" in [item.label for item in app.text_input]
+    assert "组内班次" in [item.label for item in app.multiselect]
+    assert "组最低人数" in [item.label for item in app.number_input]
+
+
+def test_sidebar_plan_switcher_changes_active_plan(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SCHEDULE_DATA_DIR", str(tmp_path))
+    app_file = Path(__file__).resolve().parents[1] / "app.py"
+    AppTest.from_file(str(app_file), default_timeout=30).run()
+
+    storage = JsonStorage(tmp_path)
+    settings = storage.load_settings()
+    assert settings is not None
+    alternate = PlanService.create_plan("备用方案")
+    storage.save_plan(alternate)
+
+    app = AppTest.from_file(str(app_file), default_timeout=30).run()
+    next(button for button in app.button if button.label == "切换方案").click().run()
+    assert not app.exception
+
+    selector = next(item for item in app.selectbox if item.label == "目标方案")
+    target_index = next(
+        index
+        for index, label in enumerate(selector.options)
+        if "备用方案" in label
+    )
+    selector.select_index(target_index).run()
+    switch_button = next(
+        button for button in app.button if button.label == "切换到此方案"
+    )
+    switch_button.click().run()
+    assert not app.exception
+
+    updated = storage.load_settings()
+    assert updated is not None
+    assert updated.active_plan_id == alternate.id
+
+
 def test_csv_import_validation_error_does_not_create_a_plan(
     tmp_path: Path,
     monkeypatch,

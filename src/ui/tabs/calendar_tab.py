@@ -1,40 +1,36 @@
-"""Tab 1：可编辑月历与周期模板铺排。
+"""Tab 1：独立月历模块 + 日历下方的明细与周期模板铺排。
 
-流程：
-1. FullCalendar 返回 dateClick / eventClick → 统一打开当天的全员编辑弹窗；
-2. 弹窗保存经过 ScheduleService 校验并原子落盘；
-3. 周期模板先生成预览（只补空白），确认后才应用。
+页面顺序固定为：月历 → 方案概览 → 硬约束/缺岗提示 → 缺岗与排班明细 →
+周期模板。日历组件单独封装在 ``src.ui.calendar_view``，并且只在日历 Tab
+激活时挂载，避免隐藏 Tab 中组件宽度为 0 导致切回后月历空白。
 """
 
 from __future__ import annotations
 
 import hashlib
 from datetime import date
-from typing import Any
 
 import pandas as pd
 import streamlit as st
-from pydantic import ValidationError
-from streamlit_calendar import calendar
 
 from src.models import AppSettings, Person, SchedulePlan, Shift
 from src.services.constraint_service import ConstraintService, HardConstraintViolation
-from src.services.coverage_service import CoverageService
-from src.services.schedule_service import ScheduleService, ScheduleServiceError
+from src.services.coverage_service import CoverageReport, CoverageService
 from src.services.template_service import (
     TemplatePreview,
     TemplateRequest,
     TemplateService,
     TemplateServiceError,
 )
+from src.ui.calendar_view import (
+    REST_OPTION,
+    format_shift_option,
+    render as render_calendar,
+    shift_label,
+)
 from src.ui.state import persist_active_plan, set_flash
-from src.utils.dates import local_date_from_iso, month_end, month_start
+from src.utils.dates import month_end, month_start
 from src.utils.storage import JsonStorage, StorageError
-
-_REST_OPTION = "__REST__"
-_SELECTED_DATE = "calendar.selected_date"
-_CALENDAR_INITIAL_DATE = "calendar.initial_date"
-_CALENDAR_VERSION = "calendar.version"
 
 _TEMPLATE_START = "template.start_date"
 _TEMPLATE_END = "template.end_date"
@@ -42,60 +38,6 @@ _TEMPLATE_PEOPLE = "template.person_ids"
 _TEMPLATE_CYCLE_DAYS = "template.cycle_days"
 _TEMPLATE_CELLS = "template.cells"
 _TEMPLATE_PREVIEW = "template.preview"
-
-_WEEKDAYS = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
-
-
-def _text_color(hex_color: str) -> str:
-    color = hex_color.lstrip("#")
-    red, green, blue = (int(color[index : index + 2], 16) for index in (0, 2, 4))
-    luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255
-    return "#0F172A" if luminance > 0.66 else "#FFFFFF"
-
-
-def _shift_label(shift_id: str, shifts: dict[str, Shift]) -> str:
-    shift = shifts.get(shift_id)
-    return shift.name if shift else f"未知班次({shift_id})"
-
-
-def _format_shift_option(value: str, shifts: dict[str, Shift]) -> str:
-    if value == _REST_OPTION:
-        return "休息"
-    shift = shifts.get(value)
-    return shift.name if shift else "未知班次"
-
-
-def _ensure_calendar_state() -> None:
-    st.session_state.setdefault(_CALENDAR_INITIAL_DATE, date.today())
-    st.session_state.setdefault(_CALENDAR_VERSION, 0)
-    st.session_state.setdefault(_SELECTED_DATE, None)
-
-
-def _close_day_editor() -> None:
-    """清理弹窗关联状态并重挂日历，防止旧点击值反复触发弹窗。"""
-    if st.session_state.get(_SELECTED_DATE) is None:
-        return
-    st.session_state[_SELECTED_DATE] = None
-    st.session_state[_CALENDAR_VERSION] = (
-        int(st.session_state.get(_CALENDAR_VERSION, 0)) + 1
-    )
-
-
-def _clicked_date(component_value: Any) -> date | None:
-    if not isinstance(component_value, dict):
-        return None
-    callback = component_value.get("callback")
-    raw: str | None = None
-    if callback == "dateClick":
-        raw = component_value.get("dateClick", {}).get("date")
-    elif callback == "eventClick":
-        raw = component_value.get("eventClick", {}).get("event", {}).get("start")
-    if not raw:
-        return None
-    try:
-        return local_date_from_iso(str(raw))
-    except (TypeError, ValueError):
-        return None
 
 
 def _render_constraint_banner(
@@ -109,217 +51,57 @@ def _render_constraint_banner(
             st.markdown(f"- {violation.message}")
 
 
-@st.dialog(
-    "编辑当天排班",
-    width="large",
-    on_dismiss=_close_day_editor,
-)
-def _day_editor_dialog(
+def _render_coverage_detail(coverage: CoverageReport) -> None:
+    if not coverage.has_shortages:
+        st.caption("所有已有安排的日期均满足覆盖组/班次的最低人数。")
+        return
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "日期": item.date.isoformat(),
+                    "覆盖项": item.display_name,
+                    "最低人数": item.required,
+                    "已排人数": item.assigned,
+                    "缺口": item.shortage,
+                }
+                for item in coverage.shortages
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    st.caption("覆盖组内任一成员的排班人数会合并计算；停用组不参与检查。")
+
+
+def _render_schedule_detail(
     settings: AppSettings,
     plan: SchedulePlan,
-    on_date: date,
-    storage: JsonStorage,
 ) -> None:
-    st.markdown(
-        f"#### {on_date.isoformat()} · {_WEEKDAYS[on_date.weekday()]}"
-    )
-    st.caption(
-        "每位人员最多一个班次；选择“休息”会清除该人当天安排。"
-        "请假、已停用人员/班次的历史安排会自动保留。"
-    )
-
     people = {person.id: person for person in settings.people}
     shifts = {shift.id: shift for shift in settings.shifts}
-    current_day = plan.day_map.get(on_date)
-
-    try:
-        edit_view = ScheduleService.build_edit_view(settings, plan, on_date)
-    except ScheduleServiceError as exc:
-        st.error(f"这一天无法安全编辑：{exc}")
-        st.caption("请先修复对应 JSON 文件或恢复缺失的配置。")
-        if st.button("关闭", width="stretch"):
-            _close_day_editor()
-            st.rerun()
-        return
-
-    if edit_view.on_leave_people:
-        names = "、".join(person.name for person in edit_view.on_leave_people)
-        st.info(f"请假锁定：{names}。新安排不会提供给请假人员。")
-
-    if edit_view.preserved_assignments:
-        st.warning(
-            "以下安排涉及请假、停用或历史数据，本次编辑会原样保留。"
-            "请假冲突请在 Tab 2 中确认清理；停用项需先恢复配置后才能修改。"
-        )
-        preserved_rows = [
-            {
-                "人员": getattr(
-                    people.get(assignment.person_id),
-                    "name",
-                    assignment.person_id,
-                ),
-                "班次": _shift_label(assignment.shift_id, shifts),
-            }
-            for assignment in edit_view.preserved_assignments
-        ]
+    rows = [
+        {
+            "日期": day.date.isoformat(),
+            "人员": getattr(
+                people.get(assignment.person_id),
+                "name",
+                assignment.person_id,
+            ),
+            "班次": shift_label(assignment.shift_id, shifts),
+            "交接备注": day.note,
+        }
+        for day in sorted(plan.days, key=lambda item: item.date)
+        for assignment in day.assignments
+    ]
+    if rows:
         st.dataframe(
-            pd.DataFrame(preserved_rows),
+            pd.DataFrame(rows),
             width="stretch",
             hide_index=True,
         )
-
-    active_shifts = {shift.id: shift for shift in edit_view.active_shifts}
-    editable_people = edit_view.editable_people
-    version = int(st.session_state.get(_CALENDAR_VERSION, 0))
-    editor_key = f"day_editor::{plan.id}::{on_date.isoformat()}::{version}"
-    edited = None
-
-    with st.form(f"day_form::{editor_key}", border=False):
-        if editable_people:
-            table = pd.DataFrame(
-                {
-                    "人员": [person.name for person in editable_people],
-                    "班次": [
-                        edit_view.initial_shift_by_person.get(
-                            person.id, _REST_OPTION
-                        )
-                        or _REST_OPTION
-                        for person in editable_people
-                    ],
-                },
-                index=[person.id for person in editable_people],
-            )
-            edited = st.data_editor(
-                table,
-                width="stretch",
-                hide_index=True,
-                num_rows="fixed",
-                height=min(420, 48 + 36 * len(editable_people)),
-                disabled=["人员"],
-                column_config={
-                    "班次": st.column_config.SelectboxColumn(
-                        "班次",
-                        required=True,
-                        options=[_REST_OPTION, *active_shifts.keys()],
-                        format_func=lambda value: _format_shift_option(
-                            value, active_shifts
-                        ),
-                    )
-                },
-                key=editor_key,
-            )
-        else:
-            st.info("当前没有可编辑的启用人员；仍可填写或修改交接备注。")
-
-        note = st.text_area(
-            "交接备注（可选）",
-            value=current_day.note if current_day else "",
-            max_chars=1000,
-            height=100,
-            key=f"day_note::{editor_key}",
-        )
-        submitted = st.form_submit_button(
-            "保存排班",
-            type="primary",
-            width="stretch",
-        )
-
-    if st.button("取消并关闭", width="stretch"):
-        _close_day_editor()
-        st.rerun()
-
-    if not submitted:
-        return
-
-    selected: dict[str, str | None] = {}
-    if editable_people:
-        if edited is None or set(edited.index) != {
-            person.id for person in editable_people
-        }:
-            st.error("排班表格结构异常，请关闭弹窗后重试。")
-            return
-        for person_id in edited.index:
-            value = edited.at[person_id, "班次"]
-            if value == _REST_OPTION:
-                selected[str(person_id)] = None
-            elif value in active_shifts:
-                selected[str(person_id)] = str(value)
-            else:
-                st.error("存在无法识别的班次选项，请重新选择。")
-                return
-
-    try:
-        merged = edit_view.merge_selections(selected)
-        day = ScheduleService.build_day(settings, on_date, merged, note)
-        updated = ScheduleService.upsert_day(plan, day)
-        if updated.days == plan.days:
-            set_flash("没有检测到排班变化。", "info")
-            _close_day_editor()
-            st.rerun()
-
-        previous_violations = ConstraintService.find_hard_violations(settings, plan)
-        current_violations = ConstraintService.find_hard_violations(settings, updated)
-        new_violations = ConstraintService.new_violations(
-            previous_violations, current_violations
-        )
-        persist_active_plan(storage, updated)
-        st.session_state.pop(_TEMPLATE_PREVIEW, None)
-    except (ScheduleServiceError, ValidationError, StorageError) as exc:
-        st.error(f"保存失败：{exc}")
-        return
-
-    if new_violations:
-        set_flash(
-            f"已保存当天排班，但新增 {len(new_violations)} 个硬约束冲突，"
-            "请查看日历顶部提示。",
-            "warning",
-        )
     else:
-        set_flash(f"已保存 {on_date.isoformat()} 的排班。", "success")
-    _close_day_editor()
-    st.rerun()
-
-
-def _render_calendar(
-    settings: AppSettings,
-    plan: SchedulePlan,
-    storage: JsonStorage,
-    events: list[dict[str, object]],
-) -> None:
-    _ensure_calendar_state()
-    version = int(st.session_state.get(_CALENDAR_VERSION, 0))
-    initial_date = st.session_state.get(_CALENDAR_INITIAL_DATE, date.today())
-
-    component_value = calendar(
-        events=events,
-        callbacks=["dateClick", "eventClick"],
-        options={
-            "initialView": "dayGridMonth",
-            "initialDate": initial_date.isoformat(),
-            "locale": "zh-cn",
-            "height": 660,
-            "editable": False,
-            "selectable": False,
-            "dayMaxEvents": 3,
-            "displayEventTime": False,
-            "headerToolbar": {
-                "left": "prev,next today",
-                "center": "title",
-                "right": "",
-            },
-        },
-        key=f"schedule_calendar::{plan.id}::{version}",
-    )
-
-    if st.session_state.get(_SELECTED_DATE) is None:
-        clicked = _clicked_date(component_value)
-        if clicked:
-            st.session_state[_SELECTED_DATE] = clicked
-            st.session_state[_CALENDAR_INITIAL_DATE] = clicked
-
-    selected_date = st.session_state.get(_SELECTED_DATE)
-    if selected_date:
-        _day_editor_dialog(settings, plan, selected_date, storage)
+        st.caption("暂无明细。")
 
 
 def _initial_template_defaults(settings: AppSettings) -> None:
@@ -373,7 +155,7 @@ def _render_template_preview(
         {
             "日期": addition.date.isoformat(),
             "人员": getattr(people.get(addition.person_id), "name", addition.person_id),
-            "班次": _shift_label(addition.shift_id, shifts),
+            "班次": shift_label(addition.shift_id, shifts),
         }
         for addition in preview.added
     ]
@@ -496,7 +278,7 @@ def _render_template_section(
                     (
                         cells.get((day_index, person.id))
                         if cells.get((day_index, person.id)) in valid_shift_ids
-                        else _REST_OPTION
+                        else REST_OPTION
                     )
                     for day_index in range(cycle_days)
                 ]
@@ -520,8 +302,8 @@ def _render_template_section(
                 person.name: st.column_config.SelectboxColumn(
                     person.name,
                     required=True,
-                    options=[_REST_OPTION, *shifts.keys()],
-                    format_func=lambda value: _format_shift_option(value, shifts),
+                    options=[REST_OPTION, *shifts.keys()],
+                    format_func=lambda value: format_shift_option(value, shifts),
                 )
                 for person in selected_people
             },
@@ -532,7 +314,7 @@ def _render_template_section(
         for day_index, row_label in enumerate(edited_table.index):
             for person in selected_people:
                 value = edited_table.at[row_label, person.name]
-                if value == _REST_OPTION:
+                if value == REST_OPTION:
                     latest_cells[(day_index, person.id)] = None
                 elif value in shifts:
                     latest_cells[(day_index, person.id)] = str(value)
@@ -584,30 +366,21 @@ def render(
     settings: AppSettings,
     plan: SchedulePlan,
     storage: JsonStorage,
+    *,
+    is_active: bool = True,
 ) -> None:
-    people = {person.id: person for person in settings.people}
-    shifts = {shift.id: shift for shift in settings.shifts}
+    st.caption(
+        "点击任意日期或已有事件，编辑当天全员排班；日历下方查看缺岗、明细和模板铺排。"
+    )
+    render_calendar(settings, plan, storage, is_active=is_active)
 
-    events: list[dict[str, object]] = []
-    for day in sorted(plan.days, key=lambda item: item.date):
-        for assignment in day.assignments:
-            person_name = getattr(
-                people.get(assignment.person_id), "name", assignment.person_id
-            )
-            shift_name = _shift_label(assignment.shift_id, shifts)
-            color = getattr(shifts.get(assignment.shift_id), "color", "#94A3B8")
-            events.append(
-                {
-                    "id": f"{day.date.isoformat()}::{assignment.person_id}",
-                    "title": f"{person_name} · {shift_name}",
-                    "start": day.date.isoformat(),
-                    "allDay": True,
-                    "backgroundColor": color,
-                    "borderColor": color,
-                    "textColor": _text_color(color),
-                }
-            )
+    if not any(day.assignments for day in plan.days):
+        st.info(
+            "当前方案还没有排班。可以点击任意日期手动安排，"
+            "或在下方使用周期模板批量铺排。"
+        )
 
+    st.divider()
     first_col, second_col, third_col, fourth_col = st.columns(4)
     first_col.metric("已安排人次", sum(len(day.assignments) for day in plan.days))
     second_col.metric(
@@ -629,56 +402,15 @@ def render(
     coverage = CoverageService.build_report(settings, plan)
     if coverage.has_shortages:
         st.warning(
-            f"缺岗预警：已有安排的日期中有 {len(coverage.shortages)} 个"
-            f"班次低于最低在岗人数，总缺口 {coverage.total_gap} 人。"
-        )
-        with st.expander("查看缺岗明细", expanded=False):
-            st.dataframe(
-                pd.DataFrame(
-                    [
-                        {
-                            "日期": item.date.isoformat(),
-                            "班次": item.shift_name,
-                            "最低人数": item.required,
-                            "已排人数": item.assigned,
-                            "缺口": item.shortage,
-                        }
-                        for item in coverage.shortages
-                    ]
-                ),
-                width="stretch",
-                hide_index=True,
-            )
-
-    if not events:
-        st.info(
-            "当前方案还没有排班。可以点击任意日期手动安排，"
-            "或在下方使用周期模板批量铺排。"
+            f"缺岗预警：已有安排的日期中有 {len(coverage.shortages)} 项"
+            f"最低人数要求未满足，总缺口 {coverage.total_gap} 人。"
         )
 
-    _render_calendar(settings, plan, storage, events)
-    with st.expander("查看排班明细", expanded=False):
-        rows = [
-            {
-                "日期": day.date.isoformat(),
-                "人员": getattr(
-                    people.get(assignment.person_id),
-                    "name",
-                    assignment.person_id,
-                ),
-                "班次": _shift_label(assignment.shift_id, shifts),
-                "交接备注": day.note,
-            }
-            for day in sorted(plan.days, key=lambda item: item.date)
-            for assignment in day.assignments
-        ]
-        if rows:
-            st.dataframe(
-                pd.DataFrame(rows),
-                width="stretch",
-                hide_index=True,
-            )
-        else:
-            st.caption("暂无明细。")
+    st.markdown("#### 排班与缺岗明细")
+    with st.expander("缺岗明细", expanded=coverage.has_shortages):
+        _render_coverage_detail(coverage)
+    with st.expander("排班明细", expanded=False):
+        _render_schedule_detail(settings, plan)
 
+    st.divider()
     _render_template_section(settings, plan, storage)

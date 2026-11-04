@@ -285,7 +285,7 @@ def render(settings: AppSettings, plan: SchedulePlan) -> None:
     gap_col.metric(
         "缺岗总人数",
         coverage.total_gap,
-        help="方案已有安排日期中，各启用班次低于最低在岗人数的缺口总和；详情见 Tab 2。",
+        help="方案已有安排日期中，各覆盖组/班次低于最低人数的缺口总和；详情见 Tab 2。",
     )
     st.caption(
         f"{stats.active_people_count} 名启用人员 · "

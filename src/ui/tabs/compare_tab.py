@@ -420,7 +420,7 @@ def _render_swap_section(
             )
             health_col.metric("健康分", health_text)
             coverage_col.metric(
-                "缺岗班次",
+                "缺岗项",
                 f"{len(current_coverage.shortages)} → "
                 f"{len(candidate_coverage.shortages)}",
             )
@@ -546,7 +546,7 @@ def _render_repair_preview(
             f"{recommendation.health_before} → {recommendation.health_after}",
         )
         gap_col.metric(
-            "缺岗班次",
+            "缺岗项",
             f"{len(current_coverage.shortages)} → "
             f"{len(candidate_coverage.shortages)}",
         )
@@ -690,7 +690,7 @@ def _render_comparison(
             ),
         },
         {
-            "指标": "缺岗班次",
+            "指标": "缺岗项",
             "当前方案": len(current_coverage.shortages),
             "参考方案": len(reference_coverage.shortages),
             "变化（当前 - 参考）": _integer_delta(
@@ -926,7 +926,7 @@ def render(
         st.caption("方案还没有已有安排或备注的日期，暂不计算缺岗。")
     elif coverage.has_shortages:
         st.warning(
-            f"{len(coverage.shortages)} 个班次低于最低在岗人数，"
+            f"{len(coverage.shortages)} 项最低人数要求未满足，"
             f"总缺口 {coverage.total_gap} 人；检查日期 "
             f"{coverage.checked_dates[0].isoformat()} 至 "
             f"{coverage.checked_dates[-1].isoformat()}。"
@@ -936,7 +936,7 @@ def render(
                 [
                     {
                         "日期": item.date.isoformat(),
-                        "班次": item.shift_name,
+                        "覆盖项": item.display_name,
                         "最低人数": item.required,
                         "已排人数": item.assigned,
                         "缺口": item.shortage,
@@ -950,7 +950,7 @@ def render(
     else:
         st.success(
             f"已检查 {len(coverage.checked_dates)} 个已有安排的日期，"
-            "所有启用班次均达到最低人数。"
+            "所有覆盖组/班次均达到最低人数。"
         )
 
     _render_swap_section(settings, plan, storage, health, coverage)
